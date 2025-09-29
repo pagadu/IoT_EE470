@@ -1,9 +1,35 @@
 /*******************************************************
- * HW-486 (LDR) + Discrete RGB LED (with 220Ω) + Buzzer
- * - Prints Lux every 0.5 s
- * - Buzzer ON when Lux < threshold; 'B' forces ON ~5 s
- * - RGB goes White -> Red as brightness increases
+ * Title: LDR_RGB_Buzzer_ESP8266  (Active-HIGH Buzzer)
+ * -----------------------------------------------------
+ * Program Detail:
+ *   Purpose: Read light level from an HW-486 photoresistor (AO→A0),
+ *            convert ADC to Lux via a 2-point calibration, print Lux
+ *            every 0.5 s to Serial, drive an RGB LED via PWM to
+ *            indicate brightness, and sound an *active-HIGH* buzzer
+ *            when Lux is below a user threshold. Typing 'B' forces
+ *            the buzzer ON for ~5 s.
+ *   Inputs:   A0 (analog from photoresistor), Serial command 'B'
+ *   Outputs:  Serial @115200 ("ADC=…, Lux=…"); RGB LED on D5/D6/D7;
+ *             *Active-HIGH* buzzer on D2 (HIGH = ON)
+ *   Date:     September 28, 2025
+ *   Compiler: Arduino IDE / PlatformIO (ESP8266 core)
+ *   Author:   Alexander Pagaduan
+ *   Versions:
+ *     V1 – Initial: 2-point Lux calibration, LED PWM mapping,
+ *          threshold buzzer + serial override (0.5 s sampling)
+ * -----------------------------------------------------
+ * File Dependencies:
+ *   - Arduino.h
+ * -----------------------------------------------------
+ * Hardware Notes:
+ *   - HW-486: VCC→3V3, GND→GND, AO→A0 (use analog output, not DO).
+ *   - RGB LED uses 220 Ω series resistors on R/G/B; common to GND for
+ *     common-cathode (set COMMON_ANODE=1 if using common-anode to 3V3).
+ *   - Buzzer is *active-HIGH*: + (or S) → D2, – → GND.
+ *     Keep BUZZER_ACTIVE_LOW set to 0 so HIGH = ON.
  *******************************************************/
+
+
 #include <Arduino.h>
 
 /* ====== USER SETTINGS ====== */
@@ -12,8 +38,9 @@
 #define PIN_B D7
 #define PIN_BUZZER D2
 
-#define COMMON_ANODE 0            // 0=common-cathode, 1=common-anode
-#define BUZZER_ACTIVE_LOW 0       // 1 if LOW=ON, 0 if HIGH=ON
+#define COMMON_ANODE 0            // 0=common-cathode LED, 1=common-anode
+// ACTIVE-HIGH buzzer in use → keep this at 0 (means HIGH turns ON)
+#define BUZZER_ACTIVE_LOW 0       // 0: HIGH=ON (active-HIGH buzzer), 1: LOW=ON (active-LOW buzzer)
 
 float LUX_THRESHOLD = 50.0f;      // buzzer trips when Lux < threshold
 const unsigned long SAMPLE_MS = 500, BUZZ_FORCE_MS = 5000;
@@ -33,6 +60,8 @@ inline void setRGB(int r,int g,int b){   // each 0..1023
   analogWrite(PIN_G, pwm(g));
   analogWrite(PIN_B, pwm(b));
 }
+
+// Active-HIGH buzzer behavior: with BUZZER_ACTIVE_LOW==0, HIGH turns buzzer ON
 inline void buzzerOn(){  digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? LOW  : HIGH); }
 inline void buzzerOff(){ digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? HIGH : LOW ); }
 
@@ -90,7 +119,7 @@ void loop(){
     setLedFromLux(lux);
 
     if(!buzzForced){
-      if(lux < LUX_THRESHOLD) buzzerOn();
+      if(lux < LUX_THRESHOLD) buzzerOn();  // ACTIVE-HIGH: HIGH = ON
       else                    buzzerOff();
     }
 
@@ -100,4 +129,3 @@ void loop(){
 
   delay(1);
 }
- 
