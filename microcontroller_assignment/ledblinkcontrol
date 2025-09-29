@@ -1,0 +1,75 @@
+/*******************************************************
+ * Title: LED_Blink_Control_ESP8266
+ * -----------------------------------------------------
+ * Program Detail:
+ *   Purpose: Blink the onboard LED; typing 'A' in the serial
+ *            terminal makes it blink faster, typing 'B' makes
+ *            it blink slower (letters A and B only).
+ *   Inputs:  Serial at 115200 baud ('A' or 'B')
+ *   Outputs: Onboard LED (LED_BUILTIN, active LOW on ESP8266)
+ *   Date:    <fill date/time>
+ *   Compiler: Arduino IDE (ESP8266 core)
+ *   Author:  Alexander Pagaduan
+ *   Versions:
+ *     V1 – Non-blocking blink with serial control (A=fast, B=slow)
+ *
+ * -----------------------------------------------------
+ * File Dependencies:
+ *   - Arduino.h
+ *******************************************************/
+
+#include <Arduino.h>
+
+// ===== User-tunable periods (milliseconds) =====
+const unsigned long FAST_PERIOD_MS = 200;   // when 'A' is received
+const unsigned long SLOW_PERIOD_MS = 1000;  // when 'B' is received
+// ==============================================
+
+static unsigned long blinkPeriod = SLOW_PERIOD_MS;  // start slow
+static unsigned long nextToggleMs = 0;
+static bool ledOn = false; // remember: LED_BUILTIN is active LOW on ESP8266
+
+void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH); // LED off initially (active LOW)
+
+  Serial.begin(115200);
+  delay(200);
+  Serial.println();
+  Serial.println("Type 'A' for faster blink, 'B' for slower blink.");
+  Serial.println("Current period (ms): " + String(blinkPeriod));
+}
+
+void handleSerial() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == 'a' || c == 'A') {
+      blinkPeriod = FAST_PERIOD_MS;
+      Serial.println("Speed: FAST (" + String(blinkPeriod) + " ms)");
+    } else if (c == 'b' || c == 'B') {
+      blinkPeriod = SLOW_PERIOD_MS;
+      Serial.println("Speed: SLOW (" + String(blinkPeriod) + " ms)");
+    } else {
+      // ignore other characters; optional feedback:
+      // Serial.println("Use A or B only.");
+    }
+  }
+}
+
+void handleBlink() {
+  unsigned long now = millis();
+  if (now >= nextToggleMs) {
+    // toggle LED (active LOW)
+    ledOn = !ledOn;
+    digitalWrite(LED_BUILTIN, ledOn ? LOW : HIGH);
+
+    nextToggleMs = now + blinkPeriod;
+  }
+}
+
+void loop() {
+  handleSerial();
+  handleBlink();
+  // yield CPU to WiFi/watchdog
+  delay(1);
+}
