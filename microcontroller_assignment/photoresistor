@@ -1,0 +1,103 @@
+/*******************************************************
+ * HW-486 (LDR) + Discrete RGB LED (with 220Ω) + Buzzer
+ * - Prints Lux every 0.5 s
+ * - Buzzer ON when Lux < threshold; 'B' forces ON ~5 s
+ * - RGB goes White -> Red as brightness increases
+ *******************************************************/
+#include <Arduino.h>
+
+/* ====== USER SETTINGS ====== */
+#define PIN_R D5
+#define PIN_G D6
+#define PIN_B D7
+#define PIN_BUZZER D2
+
+#define COMMON_ANODE 0            // 0=common-cathode, 1=common-anode
+#define BUZZER_ACTIVE_LOW 0       // 1 if LOW=ON, 0 if HIGH=ON
+
+float LUX_THRESHOLD = 50.0f;      // buzzer trips when Lux < threshold
+const unsigned long SAMPLE_MS = 500, BUZZ_FORCE_MS = 5000;
+
+// Two-point calibration (replace with your measured pairs)
+const int   ADC1 = 200;   const float Lux1 = 20.0f;
+const int   ADC2 = 800;   const float Lux2 = 300.0f;
+/* =========================== */
+
+unsigned long tNext=0, tBuzzOff=0;
+bool buzzForced=false;
+float mLux=0, bLux=0;
+
+inline int pwm(int v){ return COMMON_ANODE ? (1023 - v) : v; }
+inline void setRGB(int r,int g,int b){   // each 0..1023
+  analogWrite(PIN_R, pwm(r));
+  analogWrite(PIN_G, pwm(g));
+  analogWrite(PIN_B, pwm(b));
+}
+inline void buzzerOn(){  digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? LOW  : HIGH); }
+inline void buzzerOff(){ digitalWrite(PIN_BUZZER, BUZZER_ACTIVE_LOW ? HIGH : LOW ); }
+
+template<typename T> T clamp(T v,T lo,T hi){ return v<lo?lo:(v>hi?hi:v); }
+float adcToLux(int a){ return mLux*a + bLux; }
+
+// White -> Red as Lux increases (keep R high; fade G & B)
+void setLedFromLux(float lux){
+  const float Lmin=0.0f, Lmax=400.0f;            // adjust Lmax for your room
+  float t = clamp((lux - Lmin)/(Lmax - Lmin), 0.0f, 1.0f);
+  int r = 1023;
+  int gb = 1023 - (int)round((1.0f - t) * 1023.0f);     // white at dark, red at bright
+  Serial.print("setLedFromLux lux="); Serial.println(lux,1);
+  Serial.print("setLedFromLux t="); Serial.println(t,1); 
+  Serial.print("setLedFromLux r="); Serial.println(r,1); 
+  Serial.print("setLedFromLux gb="); Serial.println(gb,1);
+  setRGB(r, gb, gb);
+}
+
+void setup(){
+  analogWriteRange(1023);
+  pinMode(PIN_R, OUTPUT); pinMode(PIN_G, OUTPUT); pinMode(PIN_B, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT); buzzerOff();
+
+  Serial.begin(115200); delay(200);
+
+  // calibration: Lux = m*ADC + b
+  mLux = (Lux2 - Lux1) / float(ADC2 - ADC1);
+  bLux = Lux1 - mLux * float(ADC1);
+
+  // quick white at start so you see LED is wired
+  setRGB(1023,1023,1023);
+  Serial.println("LDR+RGB+Buzzer ready. Type 'B' to buzz ~5s.");
+}
+
+void loop(){
+  // manual buzzer force
+  while(Serial.available()){
+    char c=Serial.read();
+    if(c=='B'||c=='b'){
+      buzzForced=true; tBuzzOff = millis()+BUZZ_FORCE_MS;
+      buzzerOn(); Serial.println("Buzzer: FORCED ON (5 s)");
+    }
+  }
+  if(buzzForced && (long)(millis()-tBuzzOff)>=0){
+    buzzForced=false; buzzerOff(); Serial.println("Buzzer: forced OFF");
+  }
+
+  if((long)(millis()-tNext)>=0){
+    tNext = millis()+SAMPLE_MS;
+
+    int adc = analogRead(A0);     // HW-486 AO -> A0
+    float lux = adcToLux(adc);
+
+    setLedFromLux(lux);
+
+    if(!buzzForced){
+      if(lux < LUX_THRESHOLD) buzzerOn();
+      else                    buzzerOff();
+    }
+
+    Serial.print("ADC="); Serial.print(adc);
+    Serial.print(" Lux="); Serial.println(lux,1); 
+  }
+
+  delay(1);
+}
+ 
