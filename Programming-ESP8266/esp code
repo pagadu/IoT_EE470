@@ -1,0 +1,416 @@
+/* ---------------------------------------------------------
+ * Program: EE470 ESP8266 IoT Node
+ * Version: 2.6  (timeapi.io first; HTTPS + www; redirect-safe)
+ * Inputs:
+ *   - DHT11 (temp+humidity) on D4 (GPIO2)
+ *   - LDR (light) on A0 (0..1023)
+ *   - Pushbutton on D2 (GPIO4)  -> Node_1 (active-HIGH)
+ *   - Tilt on D1 (GPIO5)        -> Node_2 (active-HIGH)
+ * Behavior (per rubric):
+ *   - USB time-zone chooser
+ *   - Time from timeapi.io (preferred) else server HTTPS Date -> Google 204 Date -> NTP
+ *   - Only send when button/tilt is activated
+ *   - Node_1 sends ONLY temp+humidity
+ *   - Node_2 sends ONLY light
+ *   - Uses https://www.alexanderpagaduan.com to avoid 301
+ * --------------------------------------------------------- */
+
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
+#include <DHT.h>
+#include <time.h>
+
+/* ===== Wi-Fi ===== */
+const char* WIFI_SSID     = "AlexP";
+const char* WIFI_PASSWORD = "r647vwsg1mqd";
+//const char* WIFI_PASSWORD = "7abf01124cd90941c6d1";
+
+/* ===== Server (use https + www) ===== */
+const char* HOST        = "www.alexanderpagaduan.com";
+const char* INSERT_PATH = "/iot_part2/iot_part2/insert.php";
+
+/* ===== Pins ===== */
+#define PIN_DHT   D4
+#define PIN_LDR   A0
+#define PIN_BTN   D2
+#define PIN_TILT  D1
+
+/* ===== DHT ===== */
+#define DHT_TYPE  DHT11
+DHT dht(PIN_DHT, DHT_TYPE);
+
+/* ===== Debounce ===== */
+unsigned long lastBtnEdge = 0, lastTiltEdge = 0;
+bool prevBtn = HIGH, prevTilt = HIGH;
+
+/* ===== Timezone (USB selection) ===== */
+String TIMEZONE = "America/Los_Angeles";
+long   TZ_OFFSET_SECONDS = -7L * 3600L; // PST = -8*3600, PDT = -7*3600
+
+/* ===== NTP ===== */
+WiFiUDP udp;
+const char* NTP_SERVER = "pool.ntp.org";
+const int   NTP_PACKET_SIZE = 48;
+byte        ntpPacket[NTP_PACKET_SIZE];
+
+/* ===== Helpers ===== */
+String two(int v){ return (v<10?"0":"") + String(v); }
+
+void ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.printf("WiFi: connecting to %s ...\n", WIFI_SSID);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) {
+    delay(300); Serial.print(".");
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("WiFi: connected, IP=%s RSSI=%d dBm\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  } else {
+    Serial.println("WiFi: FAILED to connect");
+  }
+}
+
+/* ===== Date header -> local string ===== */
+String parseHttpDateToLocal(String dateHdr, long tzOffsetSec) {
+  dateHdr.trim();
+  int comma = dateHdr.indexOf(','); if (comma >= 0) dateHdr = dateHdr.substring(comma + 1);
+  dateHdr.trim();
+  int s1=dateHdr.indexOf(' '), s2=dateHdr.indexOf(' ', s1+1), s3=dateHdr.indexOf(' ', s2+1), s4=dateHdr.indexOf(' ', s3+1);
+  if (s1<0||s2<0||s3<0||s4<0) return "";
+  String dayStr = dateHdr.substring(0, s1);
+  String monStr = dateHdr.substring(s1+1, s2);
+  String yearStr= dateHdr.substring(s2+1, s3);
+  String hmsStr = dateHdr.substring(s3+1, s4);
+
+  int day  = dayStr.toInt();
+  int year = yearStr.toInt();
+  const char* mons = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  int idx = String(mons).indexOf(monStr); if (idx < 0) return "";
+  int mon = (idx/3) + 1;
+
+  int hh = hmsStr.substring(0,2).toInt();
+  int mm = hmsStr.substring(3,5).toInt();
+  int ss = hmsStr.substring(6,8).toInt();
+
+  long total = hh*3600L + mm*60L + ss + tzOffsetSec;
+  while (total < 0)          { total += 24L*3600L; day--; }
+  while (total >= 24L*3600L) { total -= 24L*3600L; day++; }
+
+  hh = (total/3600L)%24; total %= 3600L;
+  mm = (total/60L)%60;   ss = total%60;
+
+  return String(year) + "-" + two(mon) + "-" + two(day) + " " + two(hh) + ":" + two(mm) + ":" + two(ss);
+}
+
+/* ===== NTP helpers ===== */
+bool sendNtpPacket(const char* server) {
+  memset(ntpPacket, 0, NTP_PACKET_SIZE);
+  ntpPacket[0] = 0b11100011;
+  ntpPacket[1] = 0; ntpPacket[2] = 6; ntpPacket[3] = 0xEC;
+  ntpPacket[12]= 49; ntpPacket[13]= 0x4E; ntpPacket[14]= 49; ntpPacket[15]= 52;
+  IPAddress addr; if (!WiFi.hostByName(server, addr)) return false;
+  udp.begin(2390);
+  udp.beginPacket(addr, 123);
+  udp.write(ntpPacket, NTP_PACKET_SIZE);
+  return udp.endPacket() == 1;
+}
+unsigned long readNtpEpoch() {
+  for (int i = 0; i < 10; i++) {
+    int size = udp.parsePacket();
+    if (size >= NTP_PACKET_SIZE) {
+      udp.read(ntpPacket, NTP_PACKET_SIZE);
+      unsigned long secsSince1900 =
+        (unsigned long)ntpPacket[40] << 24 |
+        (unsigned long)ntpPacket[41] << 16 |
+        (unsigned long)ntpPacket[42] << 8  |
+        (unsigned long)ntpPacket[43];
+      const unsigned long seventyYears = 2208988800UL;
+      return secsSince1900 - seventyYears; // UNIX epoch (UTC)
+    }
+    delay(100);
+  }
+  return 0;
+}
+String formatEpoch(unsigned long epoch, long tzOffsetSec){
+  if (epoch == 0) return "";
+  epoch += tzOffsetSec;
+  time_t t = (time_t)epoch;
+  struct tm * tmstruct = gmtime(&t);
+  if (!tmstruct) return "";
+  int year  = tmstruct->tm_year + 1900;
+  int month = tmstruct->tm_mon + 1;
+  int day   = tmstruct->tm_mday;
+  int hour  = tmstruct->tm_hour;
+  int min   = tmstruct->tm_min;
+  int sec   = tmstruct->tm_sec;
+  return String(year) + "-" + two(month) + "-" + two(day) + " " + two(hour) + ":" + two(min) + ":" + two(sec);
+}
+
+/* ===== TIME: timeapi.io (preferred) -> server HTTPS Date -> Google 204 -> NTP ===== */
+String read_time() {
+  // 0) timeapi.io (HTTPS)
+  {
+    WiFiClientSecure client; client.setInsecure();
+    HTTPClient http; http.setTimeout(6000);
+    String url = "https://timeapi.io/api/Time/current/zone?timeZone=" + TIMEZONE;
+    Serial.println("Time: timeapi.io ...");
+    if (http.begin(client, url)) {
+      int code = http.GET();
+      if (code == HTTP_CODE_OK) {
+        String body = http.getString(); http.end();
+        int p = body.indexOf("\"dateTime\":\"");
+        if (p >= 0) {
+          p += 12;
+          int q = body.indexOf("\"", p);
+          if (q > p) {
+            String dt = body.substring(p, q);      // 2025-10-23T20:11:31.123
+            int dot = dt.indexOf('.'); if (dot > 0) dt = dt.substring(0, dot);
+            dt.replace('T',' ');
+            Serial.println(String("Time OK (timeapi.io): ") + dt);
+            return dt;
+          }
+        }
+      } else {
+        Serial.printf("timeapi.io code=%d\n", code);
+      }
+      http.end();
+    } else {
+      Serial.println("timeapi.io: begin failed");
+    }
+  }
+
+  // 1) Your server's HTTPS Date header
+  {
+    Serial.println("Time: server HTTPS Date (insert.php?ping=1)...");
+    WiFiClientSecure client; client.setInsecure();
+    HTTPClient http; http.setTimeout(5000);
+    const char* keys[] = {"Date"};
+    String url = String("https://") + HOST + INSERT_PATH + "?ping=1";
+    if (http.begin(client, url)) {
+      http.collectHeaders(keys, 1);
+      int code = http.GET();
+      String dateHdr = http.header("Date");
+      http.end();
+      if (code > 0 && dateHdr.length()) {
+        String local = parseHttpDateToLocal(dateHdr, TZ_OFFSET_SECONDS);
+        if (local.length()) { Serial.println(String("Time OK (server Date): ")+local); return local; }
+      } else {
+        Serial.printf("Server HTTPS Date code=%d; hdr=%s\n", code, dateHdr.c_str());
+      }
+    } else {
+      Serial.println("Server HTTPS Date: begin failed");
+    }
+  }
+
+  // 2) Google connectivity check Date header (HTTP 204)
+  {
+    Serial.println("Time: Google 204 Date...");
+    WiFiClient client; HTTPClient http; http.setTimeout(4000);
+    const char* keys[] = {"Date"};
+    if (http.begin(client, "http://www.google.com/generate_204")) {
+      http.collectHeaders(keys, 1);
+      int code = http.GET();
+      String dateHdr = http.header("Date");
+      http.end();
+      if (code > 0 && dateHdr.length()) {
+        String local = parseHttpDateToLocal(dateHdr, TZ_OFFSET_SECONDS);
+        if (local.length()) { Serial.println(String("Time OK (Google Date): ")+local); return local; }
+      } else {
+        Serial.printf("Google Date code=%d; hdr=%s\n", code, dateHdr.c_str());
+      }
+    } else {
+      Serial.println("Google Date: begin failed");
+    }
+  }
+
+  // 3) NTP fallback
+  {
+    Serial.println("Time: NTP...");
+    if (sendNtpPacket(NTP_SERVER)) {
+      unsigned long epoch = readNtpEpoch();
+      if (epoch > 0) {
+        String dt = formatEpoch(epoch, TZ_OFFSET_SECONDS);
+        if (dt.length()) { Serial.println(String("Time OK (NTP): ")+dt); return dt; }
+      } else {
+        Serial.println("NTP: no response");
+      }
+    } else {
+      Serial.println("NTP: send failed");
+    }
+  }
+
+  Serial.println("Time read failed (all fallbacks).");
+  return "";
+}
+
+/* ===== Redirect-following GET (handles https & www) ===== */
+bool http_get_follow(const String& startUrl, String& resp, int& finalCode, uint8_t maxHops = 5) {
+  String cur = startUrl;
+  for (uint8_t hop = 0; hop <= maxHops; ++hop) {
+    bool useHttps = cur.startsWith("https://");
+
+    HTTPClient http; http.setTimeout(8000); http.setReuse(false);
+    const char* keys[] = {"Location"}; http.collectHeaders(keys, 1);
+
+    int code = 0;
+    if (useHttps) {
+      WiFiClientSecure client; client.setInsecure();
+      if (!http.begin(client, cur)) { finalCode = -21; return false; }
+      code = http.GET();
+    } else {
+      WiFiClient client;
+      if (!http.begin(client, cur)) { finalCode = -22; return false; }
+      code = http.GET();
+    }
+
+    if (code == HTTP_CODE_OK) {
+      resp = http.getString();
+      finalCode = code;
+      http.end();
+      return true;
+    }
+
+    if (code == HTTP_CODE_MOVED_PERMANENTLY || code == HTTP_CODE_FOUND ||
+        code == HTTP_CODE_TEMPORARY_REDIRECT || code == HTTP_CODE_PERMANENT_REDIRECT) {
+      String loc = http.header("Location");
+      http.end();
+      if (loc.length()) { cur = loc; continue; }
+      else { finalCode = code; return false; }
+    }
+
+    resp = http.getString();
+    finalCode = code;
+    http.end();
+    return false;
+  }
+  finalCode = -23; // too many redirects
+  return false;
+}
+
+/* ===== HTTPS transmit (always use https + www) ===== */
+void transmit(const String& fullPathAndQuery) {
+  ensureWiFi();
+  String url = String("https://") + HOST + fullPathAndQuery;
+  Serial.printf("TX %s\n", url.c_str());
+  String body; int code = 0;
+  bool ok = http_get_follow(url, body, code);
+  Serial.printf("HTTP %d\n", code);
+  Serial.println(body);
+}
+
+/* ===== Sensors ===== */
+bool read_sensor_1(float &t, float &h) {
+  t = dht.readTemperature();  // °C
+  h = dht.readHumidity();
+  if (isnan(t) || isnan(h)) return false;
+  return true;
+}
+int read_sensor_2() { return analogRead(PIN_LDR); }
+
+/* ===== Node actions ===== */
+void do_node_1() {
+  Serial.println("BUTTON -> Node_1 send");
+  String timestr = read_time();
+  if (timestr == "") { Serial.println("Time read failed"); return; }
+
+  float temp, hum;
+  if (!read_sensor_1(temp, hum)) { Serial.println("DHT read failed"); return; }
+
+  temp = constrain(temp, -10.0f, 100.0f);
+  hum  = constrain(hum,  0.0f,   100.0f);
+
+  // Node_1: ONLY temp+humidity (per rubric clarity)
+  String url = String(INSERT_PATH) +
+    "?node_name=node_1" +
+    "&temperature="   + String(temp, 1) +
+    "&humidity="      + String(hum, 1) +
+    "&time_received=" + timestr;
+  url.replace(" ", "%20");
+  transmit(url);
+}
+
+void do_node_2() {
+  Serial.println("TILT -> Node_2 send");
+  String timestr = read_time();
+  if (timestr == "") { Serial.println("Time read failed"); return; }
+
+  int light = read_sensor_2();
+  light = constrain(light, 0, 1023);
+
+  // Node_2: ONLY light
+  String url = String(INSERT_PATH) +
+    "?node_name=node_2" +
+    "&light="         + String(light) +
+    "&time_received=" + timestr;
+  url.replace(" ", "%20");
+  transmit(url);
+}
+
+/* ===== Setup / Loop ===== */
+void setup() {
+  Serial.begin(115200); delay(200);
+
+  Serial.println("\n==============================");
+  Serial.println("EE470 ESP8266  v2.6  (timeapi.io first; https+www; Node1 temp/hum; Node2 light)");
+  Serial.println("==============================");
+
+  // USB time-zone chooser (15s)
+  Serial.println("—> Select Your Time Zone (Default = 4: Pacific)");
+  Serial.println("1: Eastern  2: Central  3: Mountain  4: Pacific  5: Alaska  6: Hawaii  7: Atlantic");
+  Serial.print("Enter number (waiting 15s): ");
+  unsigned long t0 = millis();
+  while (!Serial.available() && millis() - t0 < 15000) delay(100);
+  if (Serial.available()) {
+    int sel = Serial.parseInt();
+    switch (sel) {
+      case 1: TIMEZONE="America/New_York";    TZ_OFFSET_SECONDS=-4*3600;  break;
+      case 2: TIMEZONE="America/Chicago";     TZ_OFFSET_SECONDS=-5*3600;  break;
+      case 3: TIMEZONE="America/Denver";      TZ_OFFSET_SECONDS=-6*3600;  break;
+      case 4: TIMEZONE="America/Los_Angeles"; TZ_OFFSET_SECONDS=-7*3600;  break;
+      case 5: TIMEZONE="America/Anchorage";   TZ_OFFSET_SECONDS=-8*3600;  break;
+      case 6: TIMEZONE="Pacific/Honolulu";    TZ_OFFSET_SECONDS=-10*3600; break;
+      case 7: TIMEZONE="America/Puerto_Rico"; TZ_OFFSET_SECONDS=-4*3600;  break;
+      default: TIMEZONE="America/Los_Angeles"; TZ_OFFSET_SECONDS=-7*3600; break;
+    }
+  } else {
+    TIMEZONE="America/Los_Angeles"; TZ_OFFSET_SECONDS=-7*3600;
+  }
+  Serial.println();
+  Serial.println("Using TZ: " + TIMEZONE);
+
+  pinMode(PIN_BTN,  INPUT);
+  pinMode(PIN_TILT, INPUT);
+  dht.begin();
+
+  ensureWiFi();
+
+  // For report questions
+  Serial.printf("Device MAC: %s\n", WiFi.macAddress().c_str());
+  Serial.printf("Free heap (RAM): %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("Flash size: %u bytes\n", ESP.getFlashChipRealSize());
+
+  Serial.println("Ready. Press button (Node_1) or tilt (Node_2).");
+}
+
+void loop() {
+  bool btnNow  = digitalRead(PIN_BTN);
+  bool tiltNow = digitalRead(PIN_TILT);
+  unsigned long ms = millis();
+
+  if (btnNow != prevBtn && (ms - lastBtnEdge) > 30) {
+    lastBtnEdge = ms; prevBtn = btnNow;
+    if (btnNow == HIGH) do_node_1();
+  }
+  if (tiltNow != prevTilt && (ms - lastTiltEdge) > 30) {
+    lastTiltEdge = ms; prevTilt = tiltNow;
+    if (tiltNow == HIGH) do_node_2();
+  }
+  delay(20);
+}
