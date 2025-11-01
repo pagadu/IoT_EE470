@@ -3,9 +3,9 @@
 
 // --- EDIT THESE 4 VALUES ---
 $DB_HOST = "localhost";
-$DB_NAME = "u620326033_AlexPagaduan";
-$DB_USER = "u620326033_db_AlexPagadua"; // keep as-is if that's the real user
-$DB_PASS = "A1y55Amj!";                 // your real password
+$DB_NAME = "alexpag";
+$DB_USER = "dbuser"; // keep as-is if that's the real user
+$DB_PASS = "mypass";                 // your real password
 
 // Debug while fixing; set to false when stable
 define('APP_DEBUG', true);
