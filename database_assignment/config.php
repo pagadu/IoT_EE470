@@ -1,9 +1,9 @@
 <?php
 // ====== UPDATE THESE 3 LINES ======
 $DB_HOST = "localhost";
-$DB_NAME = "u620326033_AlexPagaduan";
-$DB_USER = "u620326033_db_AlexPagadua";
-$DB_PASS = "A1y55Amj!";  // <-- type your MySQL password here
+$DB_NAME = "sfdsffs";
+$DB_USER = "fsdfsfs";
+$DB_PASS = "sdfs";  // <-- type your MySQL password here
 
 function db() {
   global $DB_HOST, $DB_NAME, $DB_USER, $DB_PASS;
