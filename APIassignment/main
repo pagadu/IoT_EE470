@@ -1,0 +1,146 @@
+#ifdef ESP32
+  #include <WiFi.h>
+  #include <HTTPClient.h>
+  #include <WiFiClientSecure.h>
+#else
+  #include <ESP8266WiFi.h>
+  #include <ESP8266HTTPClient.h>
+  #include <WiFiClientSecureBearSSL.h>
+#endif
+
+// === Wi-Fi credentials ===
+const char* ssid     = "Warriors1";
+const char* password = "7abf01124cd90941c6d1";
+
+// === URLs ===
+const char* googleUrl = "https://script.google.com/macros/s/AKfycbyOjgvL8nuuVZX7FClKhVb2woJZGwm35zKuej4wQ27Vt06iGirLHOfoi2jJ6XbRuheqKg/exec";
+const char* ledUrl    = "https://alexanderpagaduan.com/iot/results.txt";
+const char* redUrl    = "https://alexanderpagaduan.com/iot/red.txt";
+const char* greenUrl  = "https://alexanderpagaduan.com/iot/green.txt";
+const char* blueUrl   = "https://alexanderpagaduan.com/iot/blue.txt";
+
+// === Pin assignments ===
+int ledPin   = 5;    // D1 → main LED
+int redPin   = 14;   // D5 → RGB Red
+int greenPin = 12;   // D6 → RGB Green
+int bluePin  = 13;   // D7 → RGB Blue
+int btn1     = 4;    // D2 → Button 1 (Google trigger)
+int btn2     = 0;    // D3 → Button 2 (LED/RGB refresh)
+
+// === State ===
+unsigned long lastCheck = 0;
+bool btn1Prev = HIGH, btn2Prev = HIGH;
+
+// === Function declarations ===
+void sendToGoogle();
+void updateLED_RGB();
+
+void setup() {
+  Serial.begin(115200);
+
+  // Outputs
+  pinMode(ledPin, OUTPUT);
+  pinMode(redPin, OUTPUT);
+  pinMode(greenPin, OUTPUT);
+  pinMode(bluePin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+
+  // Inputs with internal pullups
+  pinMode(btn1, INPUT_PULLUP);
+  pinMode(btn2, INPUT_PULLUP);
+
+  // Wi-Fi connect
+  Serial.println("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println("\n✅ Connected to WiFi!");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+  bool b1 = digitalRead(btn1);
+  bool b2 = digitalRead(btn2);
+
+  // --- Button 1 → Google trigger ---
+  if (b1 != btn1Prev && b1 == LOW) {  // detect falling edge
+    Serial.println("📤 Button 1 pressed → sending to Google...");
+    sendToGoogle();
+  }
+  btn1Prev = b1;
+
+  // --- Button 2 → LED/RGB refresh ---
+  if (b2 != btn2Prev && b2 == LOW) {  // detect falling edge
+    Serial.println("🔄 Button 2 pressed → updating LED + RGB...");
+    updateLED_RGB();
+  }
+  btn2Prev = b2;
+
+  // --- automatic refresh every 2 s ---
+  if (millis() - lastCheck > 2000) {
+    updateLED_RGB();
+    lastCheck = millis();
+  }
+}
+
+// === LED & RGB updater ===
+void updateLED_RGB() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
+  client->setInsecure();
+
+  HTTPClient http;
+  http.begin(*client, ledUrl);
+  if (http.GET() == HTTP_CODE_OK) {
+    String s = http.getString(); s.trim();
+    digitalWrite(ledPin, s == "on" ? HIGH : LOW);
+  }
+  http.end();
+
+  auto getVal = [&](const char* url) {
+    HTTPClient h; h.begin(*client, url);
+    int val = 0;
+    if (h.GET() == HTTP_CODE_OK) {
+      String s = h.getString(); s.trim();
+      val = constrain(s.toInt(), 0, 255);
+    }
+    h.end();
+    return val;
+  };
+
+  int r = getVal(redUrl);
+  int g = getVal(greenUrl);
+  int b = getVal(blueUrl);
+
+  analogWrite(redPin, r);
+  analogWrite(greenPin, g);
+  analogWrite(bluePin, b);
+
+  Serial.printf("Updated → LED:%s | RGB(%d,%d,%d)\n",
+                digitalRead(ledPin) ? "ON" : "OFF", r, g, b);
+}
+
+// === Google Script trigger ===
+void sendToGoogle() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
+  client->setInsecure();
+  HTTPClient http;
+
+  int sensorValue = random(20, 40);
+  String url = String(googleUrl) + "?sensorValue=" + String(sensorValue);
+  http.begin(*client, url);
+  int code = http.GET();
+
+  if (code == HTTP_CODE_OK)
+    Serial.println("✅ Google trigger sent!");
+  else if (code == 302)
+    Serial.println("ℹ️ Redirect (Google accepted request).");
+  else
+    Serial.println("⚠️ Google trigger failed, code: " + String(code));
+
+  http.end();
+}
