@@ -1,0 +1,73 @@
+import paho.mqtt.client as mqtt
+import pymysql
+import time
+
+# -------------------
+# MQTT CONFIG
+# -------------------
+BROKER = "broker.hivemq.com"
+TOPIC  = "testtopic/temp/outTopic/alexander"
+
+# -------------------
+# DATABASE CONFIG (Hostinger Remote MySQL)
+# -------------------
+DB_HOST = "srv738.hstgr.io"                 # Hostinger remote DB host
+DB_NAME = "u620326033_AlexPagaduan"
+DB_USER = "u620326033_db_AlexPagadua"
+DB_PASS = "A1y55Amj!"
+DB_TABLE = "mqtt_assignment"
+
+# -------------------
+# DB Connection
+# -------------------
+def db_connect():
+    return pymysql.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASS,
+        database=DB_NAME,
+        charset='utf8mb4',
+        cursorclass=pymysql.cursors.DictCursor
+    )
+
+# -------------------
+# INSERT INTO DB
+# -------------------
+def insert_value(pot_value):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        sql = f"INSERT INTO {DB_TABLE} (value) VALUES (%s)"
+        cur.execute(sql, (float(pot_value),))
+        conn.commit()
+        conn.close()
+        print(f"[DB] Inserted value: {pot_value}")
+    except Exception as e:
+        print("[DB ERROR]", e)
+
+# -------------------
+# MQTT CALLBACK
+# -------------------
+def on_message(client, userdata, msg):
+    payload = msg.payload.decode().strip()
+    print(f"[MQTT] Received: {payload}")
+
+    # Only store numeric values
+    if payload.replace('.', '', 1).isdigit():
+        insert_value(payload)
+    else:
+        print("[MQTT] Ignored non-numeric payload")
+
+# -------------------
+# MAIN
+# -------------------
+client = mqtt.Client()
+client.on_message = on_message
+
+print("Connecting to MQTT Broker...")
+client.connect(BROKER, 1883, 60)
+
+client.subscribe(TOPIC)
+print(f"Subscribed to: {TOPIC}")
+
+client.loop_forever()
