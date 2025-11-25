@@ -1,0 +1,25 @@
+import paho.mqtt.client as mqtt
+
+BROKER = "mqtt-dashboard.com"
+IN_TOPIC  = "testtopic/temp/inTopic/alexander"
+OUT_TOPIC = "testtopic/temp/outTopic/alexander"
+
+def on_connect(client, userdata, flags, rc):
+    print("Friend connected!")
+    client.subscribe(OUT_TOPIC)   # Friend listens for your ESP's pot values
+
+def on_message(client, userdata, msg):
+    value = msg.payload.decode()
+    print(f"[Friend Received] {value}")
+
+    # Simulate friend pressing a switch — turn LED ON
+    client.publish(IN_TOPIC, "1")
+    print("[Friend Sent] LED ON")
+
+client = mqtt.Client()
+client.on_connect = on_connect
+client.on_message = on_message
+
+print("Connecting friend node…")
+client.connect(BROKER, 1883, 60)
+client.loop_forever()
