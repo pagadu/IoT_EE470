@@ -1,0 +1,94 @@
+#include <Arduino.h>
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+
+#define POT_PIN   A0
+#define LED_PIN   D5
+#define SWITCH_PIN D6
+
+// ======== EDIT THESE ==========
+const char* ssid = "Warriors1";
+const char* password = "7abf01124cd90941c6d1";
+const char* mqtt_server = "broker.mqttdashboard.com";
+
+String outTopic = "testtopic/temp/outTopic/alexander";
+String inTopic  = "testtopic/temp/inTopic/alexander";
+// ===============================
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+unsigned long lastMsg = 0;
+
+void callback(char* topic, byte* message, unsigned int length) {
+  Serial.print("Incoming on ");
+  Serial.print(topic);
+  Serial.print(" = ");
+
+  String msg = "";
+  for (int i = 0; i < length; i++) {
+    msg += (char)message[i];
+  }
+  Serial.println(msg);
+
+  // Assignment rules: 1 → ON, 0 → OFF
+  if (msg == "1") {
+    digitalWrite(LED_PIN, HIGH);
+    Serial.println("LED → ON");
+  }
+  else if (msg == "0") {
+    digitalWrite(LED_PIN, LOW);
+    Serial.println("LED → OFF");
+  }
+}
+
+void setup_wifi() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    if (client.connect("ESP8266Client-alexander")) {
+      client.subscribe(inTopic.c_str());
+    } else {
+      delay(2000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(POT_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
+
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+
+  Serial.println("MQTT READY");
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  unsigned long now = millis();
+  if (now - lastMsg > 15000) {
+    lastMsg = now;
+
+    int potValue = analogRead(POT_PIN);
+    String payload = String(potValue);
+
+    client.publish(outTopic.c_str(), payload.c_str());
+
+    Serial.print("Published: ");
+    Serial.println(payload);
+  }
+}
